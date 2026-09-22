@@ -6,7 +6,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AulaPost } from '@aula-mcp/aula-client';
+import type { AulaPost, NormalisedWeekPlan } from '@aula-mcp/aula-client';
 import {
   AulaStepUpRequiredError,
   isoDate,
@@ -152,6 +152,27 @@ export function htmlToText(html: string): string {
     .replace(/&gt;/g, '>')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/**
+ * SkolePortal sends lesson descriptions and the week note as HTML. They are
+ * reduced to text here, in the tool layer, the way Aula post bodies are
+ * (`slimPost`); the client keeps the vendor markup and `raw` is left as the
+ * vendor sent it. A note with no text left is dropped. Exported for tests.
+ */
+export function skoleportalPlanAsText(plan: NormalisedWeekPlan): NormalisedWeekPlan {
+  const items = plan.items.map((item) => {
+    if (item.content === undefined) return item;
+    const { content, ...rest } = item;
+    const text = htmlToText(content);
+    return text ? { ...rest, content: text } : rest;
+  });
+  const notes = (plan.notes ?? []).flatMap((note) => {
+    const content = htmlToText(note.content);
+    return content ? [{ ...note, content }] : [];
+  });
+  const { notes: _notes, ...rest } = plan;
+  return { ...rest, items, ...(notes.length > 0 ? { notes } : {}) };
 }
 
 interface PdfTextResult {
@@ -893,9 +914,11 @@ export function registerTools(server: McpServer, context: AulaContext): void {
     async (args) => {
       const sp = await context.getEasyIqSkoleportal();
       // The MCP tool wants the week note too; the CLI poller does not (see IntegrationContext).
-      return jsonContent(
-        await sp.getWeekPlan({ ...(await buildIntegrationCtx(args)), includeNotes: true }),
-      );
+      const plan = await sp.getWeekPlan({
+        ...(await buildIntegrationCtx(args)),
+        includeNotes: true,
+      });
+      return jsonContent(skoleportalPlanAsText(plan));
     },
   );
 

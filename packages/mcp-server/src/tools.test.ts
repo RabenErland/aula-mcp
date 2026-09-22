@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { htmlToText, registerTools, slimPost, validateSetTemplateArgs } from './tools.ts';
+import {
+  htmlToText,
+  registerTools,
+  skoleportalPlanAsText,
+  slimPost,
+  validateSetTemplateArgs,
+} from './tools.ts';
 
 describe('validateSetTemplateArgs', () => {
   test('picked_up_by needs pickedUpBy', () => {
@@ -256,5 +262,108 @@ describe('slimPost', () => {
     });
     expect(slim.attachments).toHaveLength(1);
     expect(slim.attachments?.[0]?.name).toBe('ok.pdf');
+  });
+});
+
+describe('skoleportalPlanAsText', () => {
+  const plan = {
+    items: [
+      {
+        kind: 'event',
+        subject: 'Dansk / 5C',
+        content: '<p>Læs s. 20</p><p>Husk <strong>bogen</strong></p>',
+      },
+      { kind: 'event', subject: 'Klub', content: '<p>\u00a0</p>' },
+      { kind: 'event', subject: 'Idræt' },
+    ],
+    notes: [
+      {
+        childName: 'Anna',
+        className: '5C',
+        content: '<p>Kære forældre</p><p>Tur onsdag</p>',
+      },
+      { childName: 'Anna', className: '5C', content: '<p>\u00a0</p>' },
+    ],
+    raw: { anna: { events: [{ Description: '<p>Læs s. 20</p>' }] } },
+    warnings: ['child 2: week note: boom'],
+  };
+
+  test('reduces item and note content to text and leaves the other fields alone', () => {
+    const out = skoleportalPlanAsText(plan);
+    expect(out.items[0]).toEqual({
+      kind: 'event',
+      subject: 'Dansk / 5C',
+      content: 'Læs s. 20\nHusk bogen',
+    });
+    expect(out.notes).toEqual([
+      {
+        childName: 'Anna',
+        className: '5C',
+        content: 'Kære forældre\nTur onsdag',
+      },
+    ]);
+    expect(out.warnings).toEqual(['child 2: week note: boom']);
+  });
+
+  test('an item with no text left loses its content; one without content is unchanged', () => {
+    const out = skoleportalPlanAsText(plan);
+    expect(out.items[1]).toEqual({ kind: 'event', subject: 'Klub' });
+    expect(out.items[2]).toEqual({ kind: 'event', subject: 'Idræt' });
+  });
+
+  test('raw stays exactly as the vendor sent it', () => {
+    expect(skoleportalPlanAsText(plan).raw).toBe(plan.raw);
+  });
+
+  test('a plan whose notes are all empty has no notes key; a plan without notes stays without', () => {
+    const allEmpty = { items: [], notes: [{ content: '<p>&nbsp;</p>' }] };
+    expect('notes' in skoleportalPlanAsText(allEmpty)).toBe(false);
+    expect('notes' in skoleportalPlanAsText({ items: [] })).toBe(false);
+  });
+});
+
+describe('aula.ugeplan.easyiq_skoleportal', () => {
+  test('asks for the week note, returns plain text, and keeps raw', async () => {
+    let seenCtx: { includeNotes?: boolean } | undefined;
+    const plan = {
+      items: [{ kind: 'event', content: '<p>Læs s. 20</p>' }],
+      notes: [{ content: '<p>Kære forældre</p>' }],
+      raw: { anna: { weekNote: { Text: '<p>Kære forældre</p>' } } },
+    };
+    const context = {
+      record: { username: 'user1' },
+      async getClient() {
+        return { getProfilesByLogin: async () => ({ profiles: [] }) };
+      },
+      async getGuardianUserId() {
+        return '5000';
+      },
+      async getEasyIqSkoleportal() {
+        return {
+          getWeekPlan: async (ctx: { includeNotes?: boolean }) => {
+            seenCtx = ctx;
+            return plan;
+          },
+        };
+      },
+    };
+    type Handler = (args: unknown) => Promise<{ content: Array<{ text: string }> }>;
+    let handler: Handler | undefined;
+    const server = {
+      registerTool(name: string, _config: unknown, fn: Handler) {
+        if (name === 'aula.ugeplan.easyiq_skoleportal') handler = fn;
+      },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: structural stubs for McpServer/AulaContext
+    registerTools(server as any, context as any);
+    if (!handler) throw new Error('aula.ugeplan.easyiq_skoleportal was not registered');
+
+    const result = await handler({ childIds: [1], institutionCodes: ['X'] });
+    const body = JSON.parse(result.content[0]?.text ?? '{}');
+
+    expect(seenCtx?.includeNotes).toBe(true);
+    expect(body.items[0].content).toBe('Læs s. 20');
+    expect(body.notes[0].content).toBe('Kære forældre');
+    expect(body.raw).toEqual(plan.raw);
   });
 });
