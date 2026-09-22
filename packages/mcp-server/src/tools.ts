@@ -884,12 +884,18 @@ export function registerTools(server: McpServer, context: AulaContext): void {
       title: 'EasyIQ SkolePortal weekly plan',
       description:
         'Weekly plan from EasyIQ SkolePortal (widget 0128) — a different EasyIQ product than ' +
-        '`aula.ugeplan.easyiq` (widget 0001). Use when discover.detectedWidgets contains "0128".',
+        '`aula.ugeplan.easyiq` (widget 0001). Use when discover.detectedWidgets contains "0128". ' +
+        "Besides the lesson `items`, `notes` holds the class teacher's free-text note for the " +
+        'week ("Generelt om ugen": trips, meetings, homework details) — read it, it often ' +
+        'carries what the lessons do not.',
       inputSchema: integrationContextShape,
     },
     async (args) => {
       const sp = await context.getEasyIqSkoleportal();
-      return jsonContent(await sp.getWeekPlan(await buildIntegrationCtx(args)));
+      // The MCP tool wants the week note too; the CLI poller does not (see IntegrationContext).
+      return jsonContent(
+        await sp.getWeekPlan({ ...(await buildIntegrationCtx(args)), includeNotes: true }),
+      );
     },
   );
 

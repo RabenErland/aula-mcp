@@ -14,6 +14,12 @@
  *      x-institutionfilter + x-login headers; receive `{ loginId, ... }`.
  *   3. GET /Calendar/CalendarGetWeekplanEvents?loginId=…&date=YYYY-MM-DD;
  *      receive an array of events with PascalCase fields.
+ *   4. GET /Calendar/WeekPlan?loginId=…&date=YYYY-MM-DDT00:00:00 — the week's
+ *      free-text note ("Generelt om ugen"), shown above the plan in the
+ *      widget: `{ WeekPlans: [{ ActivityName, Text (HTML) }] }`, one entry
+ *      per class. The child is picked by the x-childfilter header and the
+ *      week by `date`; the loginId from step 2 is reused, so it costs no
+ *      extra authentication.
  *
  * Multi-child: the PR iterates per child because each child's loginId is
  * tied to that child's filters. We do the same.
@@ -27,6 +33,7 @@ import {
   type IntegrationContext,
   isoDate,
   isoWeekToMonday,
+  type NormalisedWeekNote,
   type NormalisedWeekPlan,
   type NormalisedWeekPlanItem,
 } from './types.ts';
@@ -34,6 +41,7 @@ import {
 const SP_BASE = 'https://skoleportal.easyiqcloud.dk';
 const SP_AUTH_URL = `${SP_BASE}/Aula/AuthenticateAulaUser`;
 const SP_WEEKPLAN_URL = `${SP_BASE}/Calendar/CalendarGetWeekplanEvents`;
+const SP_WEEKNOTE_URL = `${SP_BASE}/Calendar/WeekPlan`;
 const SP_WIDGET_ID = '0128';
 // Match PR #352's UA — SkolePortal's edge tier 302s requests it doesn't
 // recognise as a desktop browser, regardless of the auth header.
@@ -53,10 +61,21 @@ interface SpEvent {
   StartTime?: string;
   StartTimeISO?: string;
   EndTime?: string;
+  EndTimeISO?: string;
   CoursesDisplay?: string;
   ActivitiesDisplay?: string;
   ChapterTitle?: string;
   Description?: string;
+}
+
+interface SpWeekNote {
+  ActivityName?: string;
+  Text?: string;
+  IsVisible?: boolean;
+}
+
+interface SpWeekNoteResponse {
+  WeekPlans?: SpWeekNote[];
 }
 
 export interface EasyIqSkoleportalOptions {
@@ -84,7 +103,10 @@ export class EasyIqSkoleportalClient {
     // SkolePortal expects the date as `YYYY-MM-DDT00:00:00.000Z`, NOT plain
     // `YYYY-MM-DD`. The plain form silently returns no events.
     const dateParam = `${isoDate(monday)}T00:00:00.000Z`;
+    // The note endpoint takes the same instant without the milliseconds / Z.
+    const noteDateParam = `${isoDate(monday)}T00:00:00`;
     const items: NormalisedWeekPlanItem[] = [];
+    const notes: NormalisedWeekNote[] = [];
     const warnings: string[] = [];
     const rawByChild: Record<string, unknown> = {};
 
@@ -98,24 +120,35 @@ export class EasyIqSkoleportalClient {
             'SkolePortal needs the per-child userId (opaque alphanumeric token); none was provided',
           );
         }
-        const childResult = await this.fetchOneChild(ctx, childUserId, dateParam);
+        const childResult = await this.fetchOneChild(ctx, childUserId, dateParam, noteDateParam);
         rawByChild[String(childId)] = childResult.raw;
         for (const item of childResult.items) items.push(item);
+        for (const note of childResult.notes) notes.push(note);
+        if (childResult.noteWarning) warnings.push(`child ${childId}: ${childResult.noteWarning}`);
       } catch (e) {
         warnings.push(`child ${childId}: ${(e as Error).message}`);
       }
     }
 
-    return { items, raw: rawByChild, ...(warnings.length ? { warnings } : {}) };
+    return {
+      items,
+      ...(notes.length ? { notes } : {}),
+      raw: rawByChild,
+      ...(warnings.length ? { warnings } : {}),
+    };
   }
 
   private async fetchOneChild(
     ctx: IntegrationContext,
     childUserId: string,
     dateParam: string,
+    noteDateParam: string,
   ): Promise<{
     items: NormalisedWeekPlanItem[];
-    raw: { auth: SpAuthResponse; events: SpEvent[] };
+    notes: NormalisedWeekNote[];
+    /** The note is a bonus: when only it fails the events are still returned. */
+    noteWarning?: string;
+    raw: { auth: SpAuthResponse; events: SpEvent[]; weekNote?: SpWeekNoteResponse };
   }> {
     const auth = await this.authenticate(ctx, childUserId);
     if (!auth.loginId) {
@@ -129,6 +162,8 @@ export class EasyIqSkoleportalClient {
       if (childName) item.childName = childName;
       const dateStr = ev.StartTimeISO ?? ev.StartTime;
       if (dateStr) item.date = dateStr;
+      const endStr = ev.EndTimeISO ?? ev.EndTime;
+      if (endStr) item.endDate = endStr;
       const subject = decodeHtmlEntities(ev.CoursesDisplay ?? '');
       const cls = decodeHtmlEntities(ev.ActivitiesDisplay ?? '');
       if (subject || cls) item.subject = [subject, cls].filter(Boolean).join(' / ');
@@ -138,7 +173,22 @@ export class EasyIqSkoleportalClient {
       if (desc) item.content = desc;
       items.push(item);
     }
-    return { items, raw: { auth, events } };
+
+    let weekNote: SpWeekNoteResponse | undefined;
+    let noteWarning: string | undefined;
+    if (ctx.includeNotes) {
+      try {
+        weekNote = await this.fetchWeekNote(ctx, childUserId, auth.loginId, noteDateParam);
+      } catch (e) {
+        noteWarning = `week note: ${(e as Error).message}`;
+      }
+    }
+    return {
+      items,
+      notes: weekNote ? toWeekNotes(weekNote, childName) : [],
+      ...(noteWarning ? { noteWarning } : {}),
+      raw: { auth, events, ...(weekNote ? { weekNote } : {}) },
+    };
   }
 
   /**
@@ -229,4 +279,58 @@ export class EasyIqSkoleportalClient {
       return Array.isArray(parsed) ? (parsed as SpEvent[]) : [];
     });
   }
+
+  private async fetchWeekNote(
+    ctx: IntegrationContext,
+    childUserId: string,
+    loginId: string,
+    noteDateParam: string,
+  ): Promise<SpWeekNoteResponse> {
+    return this.widgets.withRetry(this.widgetId, async (token) => {
+      const headers = this.spHeaders(
+        token,
+        childUserId,
+        ctx.institutionCodes.join(','),
+        ctx.sessionId,
+      );
+      const url = `${SP_WEEKNOTE_URL}?loginId=${encodeURIComponent(loginId)}&date=${encodeURIComponent(noteDateParam)}`;
+      const res = await this.http.request(url, { method: 'GET', headers });
+      if (isWidgetTokenExpiredResponse(res.body, res.status)) {
+        return { _expired: true as const, status: res.status, bodySnippet: res.body.slice(0, 200) };
+      }
+      if (res.status !== 200) {
+        throw new Error(
+          `SkolePortal WeekPlan failed (status ${res.status}): ${res.body.slice(0, 200)}`,
+        );
+      }
+      const parsed = JSON.parse(res.body) as unknown;
+      // A 200 that is not a note response at all (an array, a renamed field) would
+      // otherwise read as "no note this week" and hide that the vendor changed.
+      // A week with no note still returns `WeekPlans: []` (confirmed live), so
+      // requiring an array is a real signal, not a guess.
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        !Array.isArray((parsed as SpWeekNoteResponse).WeekPlans)
+      ) {
+        throw new Error('unexpected response shape');
+      }
+      return parsed as SpWeekNoteResponse;
+    });
+  }
+}
+
+/** One entry per class, exactly as `WeekPlans` returns it — the widget shows every entry, unfiltered. */
+function toWeekNotes(response: SpWeekNoteResponse, childName: string): NormalisedWeekNote[] {
+  return (response.WeekPlans ?? [])
+    .filter((note) => note.IsVisible !== false)
+    .flatMap((weekPlan) => {
+      // The widget sends whitespace-only markup (`<p>&nbsp;</p>`) for a cleared note.
+      const content = decodeHtmlEntities(weekPlan.Text ?? '');
+      if (!content.replace(/<[^>]*>/g, '').trim()) return [];
+      const className = decodeHtmlEntities(weekPlan.ActivityName ?? '');
+      return [
+        { ...(childName ? { childName } : {}), ...(className ? { className } : {}), content },
+      ];
+    });
 }

@@ -27,6 +27,12 @@ export interface IntegrationContext {
   fromDate?: string;
   /** ISO YYYY-MM-DD upper bound (inclusive). */
   toDate?: string;
+  /**
+   * Also fetch the week's free-text note, for providers that have one
+   * (EasyIQ SkolePortal). Costs one extra request per child and adds a
+   * failure mode, so it is off unless asked for.
+   */
+  includeNotes?: boolean;
 }
 
 export interface IntegrationPluginInfo {
@@ -42,6 +48,8 @@ export interface NormalisedWeekPlanItem {
   childName?: string;
   /** Free-form date label, often Danish ("mandag 28. nov."). */
   date?: string;
+  /** End of the item, in the same format as `date` (a lesson's length, for one). */
+  endDate?: string;
   /** Subject / class / hold name. */
   subject?: string;
   title?: string;
@@ -54,8 +62,22 @@ export interface NormalisedWeekPlanItem {
   url?: string;
 }
 
+/**
+ * A free-text note for a whole week rather than one day — e.g. the class
+ * teacher's "Generelt om ugen" (trips, meetings, homework details).
+ */
+export interface NormalisedWeekNote {
+  childName?: string;
+  /** Class / hold the note is written for. */
+  className?: string;
+  /** HTML entities decoded but markup kept, like `NormalisedWeekPlanItem.content`. */
+  content: string;
+}
+
 export interface NormalisedWeekPlan {
   items: NormalisedWeekPlanItem[];
+  /** Weekly notes, for providers that have them. */
+  notes?: NormalisedWeekNote[];
   /** Raw upstream JSON for debugging / advanced use. */
   raw?: unknown;
   /** Soft errors per child (network ok, but parsing produced something off). */
@@ -102,8 +124,9 @@ export function isoDate(d: Date): string {
 }
 
 /**
- * Decode the handful of HTML entities Danish school content tends to leak
- * (`&aelig;` / `&oslash;` / `&aring;` + uppercase + the standard five).
+ * Decode the HTML entities Danish school content tends to leak
+ * (`&aelig;` / `&oslash;` / `&aring;` + uppercase, the standard five, and the
+ * German/French letters and punctuation that show up in language-class notes).
  * Cheap and predictable; no parser dependency. EasyIQ SkolePortal in
  * particular sends un-decoded entities in event titles and descriptions.
  *
@@ -124,6 +147,28 @@ const HTML_ENTITY_MAP: Readonly<Record<string, string>> = Object.freeze({
   '&lt;': '<',
   '&gt;': '>',
   '&nbsp;': ' ',
+  '&auml;': 'ä',
+  '&Auml;': 'Ä',
+  '&ouml;': 'ö',
+  '&Ouml;': 'Ö',
+  '&uuml;': 'ü',
+  '&Uuml;': 'Ü',
+  '&szlig;': 'ß',
+  '&eacute;': 'é',
+  '&Eacute;': 'É',
+  '&egrave;': 'è',
+  '&agrave;': 'à',
+  '&ccedil;': 'ç',
+  '&ndash;': '–',
+  '&mdash;': '—',
+  '&hellip;': '…',
+  '&bull;': '•',
+  '&laquo;': '«',
+  '&raquo;': '»',
+  '&lsquo;': '‘',
+  '&rsquo;': '’',
+  '&ldquo;': '“',
+  '&rdquo;': '”',
 });
 
 export function decodeHtmlEntities(s: string): string {
