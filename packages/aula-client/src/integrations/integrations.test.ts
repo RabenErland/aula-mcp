@@ -503,6 +503,23 @@ describe('EasyIqSkoleportalClient.getWeekPlan', () => {
     expect(events?.url).toContain('loginId=LOGIN');
   });
 
+  test('asks for all courses, so class-level events (club, green-week programme) are not left out', async () => {
+    const http = new FakeHttp().enqueue(
+      { status: 200, body: JSON.stringify({ loginId: 'LOGIN', childName: 'X' }) },
+      { status: 200, body: '[]' },
+    );
+    const client = new EasyIqSkoleportalClient({
+      http: http.asHttpClient(),
+      widgets: fakeWidgets(),
+    });
+    await client.getWeekPlan(ctx());
+    const url = http.requested[1]?.url ?? '';
+    expect(url).toContain('courseFilter=-1&textFilter=');
+    // The widget also sends these; they make no difference, so they are not sent.
+    expect(url).not.toContain('activityFilter');
+    expect(url).not.toContain('ownWeekPlan');
+  });
+
   test('makes no note request and returns no notes unless asked for', async () => {
     const http = new FakeHttp().enqueue(
       { status: 200, body: JSON.stringify({ loginId: 'LOGIN', childName: 'X' }) },

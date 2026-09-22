@@ -12,8 +12,9 @@
  *   1. Get a widget token for 0128 (via WidgetTokenManager).
  *   2. POST /Aula/AuthenticateAulaUser per-child with x-childfilter +
  *      x-institutionfilter + x-login headers; receive `{ loginId, ... }`.
- *   3. GET /Calendar/CalendarGetWeekplanEvents?loginId=…&date=YYYY-MM-DD;
- *      receive an array of events with PascalCase fields.
+ *   3. GET /Calendar/CalendarGetWeekplanEvents?loginId=…&date=YYYY-MM-DD
+ *      &courseFilter=-1&textFilter=; receive an array of events with
+ *      PascalCase fields. (courseFilter=-1 matters: see fetchEvents.)
  *   4. GET /Calendar/WeekPlan?loginId=…&date=YYYY-MM-DDT00:00:00 — the week's
  *      free-text note ("Generelt om ugen"), shown above the plan in the
  *      widget: `{ WeekPlans: [{ ActivityName, Text (HTML) }] }`, one entry
@@ -265,7 +266,13 @@ export class EasyIqSkoleportalClient {
         ctx.institutionCodes.join(','),
         ctx.sessionId,
       );
-      const url = `${SP_WEEKPLAN_URL}?loginId=${encodeURIComponent(loginId)}&date=${encodeURIComponent(dateParam)}`;
+      // `courseFilter=-1` and empty `textFilter` are what the widget always
+      // sends (confirmed by recording its traffic); without them, class-level
+      // events ("Klub", "Klassens tid", a green-week programme) were missing
+      // in an earlier one-off comparison, not reconfirmed since.
+      // `activityFilter`/`ownWeekPlan` (also sent by the widget) made no
+      // difference then and are left out.
+      const url = `${SP_WEEKPLAN_URL}?loginId=${encodeURIComponent(loginId)}&date=${encodeURIComponent(dateParam)}&courseFilter=-1&textFilter=`;
       const res = await this.http.request(url, { method: 'GET', headers });
       if (isWidgetTokenExpiredResponse(res.body, res.status)) {
         return { _expired: true as const, status: res.status, bodySnippet: res.body.slice(0, 200) };
