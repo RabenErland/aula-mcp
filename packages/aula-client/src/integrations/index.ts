@@ -15,6 +15,7 @@ export {
   isoDate,
   isoWeekString,
   isoWeekToMonday,
+  type NormalisedWeekNote,
   type NormalisedWeekPlan,
   type NormalisedWeekPlanItem,
 } from './types.ts';
