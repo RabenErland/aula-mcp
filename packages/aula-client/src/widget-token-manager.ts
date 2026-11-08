@@ -109,7 +109,7 @@ export class WidgetTokenManager {
     const second = await fn(fresh);
     if (isExpiredSignal(second)) {
       throw new Error(
-        `Widget ${widgetId}: token still rejected after refresh (status ${second.status})`,
+        `Widget ${widgetId}: token still rejected after refresh (status ${second.status}): ${second.bodySnippet}`,
       );
     }
     return second;
