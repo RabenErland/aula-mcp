@@ -63,6 +63,19 @@ describe('AulaHttpClient logging', () => {
     expect(serialised).toContain('messaging.getThreads');
   });
 
+  test('logs the response status with a redacted URL', async () => {
+    stubFetch(new Response('{}', { status: 401 }));
+    const logs: CapturedLog[] = [];
+    const client = new AulaHttpClient({ logger: capturingLogger(logs) });
+
+    await client.request(API_URL);
+
+    const serialised = JSON.stringify(logs);
+    expect(serialised).toContain('http.response');
+    expect(serialised).toContain('401');
+    expect(serialised).not.toContain(JWT);
+  });
+
   test('logs a redacted URL on a network error too', async () => {
     stubFetch(() => {
       throw new Error('unreachable');

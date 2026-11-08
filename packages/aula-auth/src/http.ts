@@ -151,6 +151,12 @@ export class AulaHttpClient {
     await this.jar.storeFromResponse(response.headers, url);
     const body = await response.text();
     const durationMs = Date.now() - start;
+    this.logger.debug('http.response', {
+      method: init.method,
+      url: sanitizeUrl(url),
+      status: response.status,
+      durationMs,
+    });
     if (this.tracer !== noopTracer) {
       const sanitisedBody = sanitizeResponseBody(body);
       this.tracer.record({
